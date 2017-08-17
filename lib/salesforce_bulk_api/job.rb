@@ -16,8 +16,6 @@ module SalesforceBulkApi
       @XML_HEADER     = '<?xml version="1.0" encoding="utf-8" ?>'
     end
 
-
-
     def create_job(batch_size, send_nulls, no_null_list)
       @batch_size = batch_size
       @send_nulls = send_nulls
@@ -25,16 +23,17 @@ module SalesforceBulkApi
 
       xml = "#{@XML_HEADER}<jobInfo xmlns=\"http://www.force.com/2009/06/asyncapi/dataload\">"
       xml += "<operation>#{@operation}</operation>"
+
       xml += "<object>#{@sobject}</object>"
-      if !@external_field.nil? # This only happens on upsert
+      # This only happens on upsert
+      if !@external_field.nil?
         xml += "<externalIdFieldName>#{@external_field}</externalIdFieldName>"
       end
+      xml += "<concurrencyMode>Serial</concurrencyMode>"
       xml += "<contentType>XML</contentType>"
       xml += "</jobInfo>"
-
       path = "job"
       headers = Hash['Content-Type' => 'application/xml; charset=utf-8']
-
       response = @connection.post_xml(nil, path, xml, headers)
       response_parsed = XmlSimple.xml_in(response)
 
@@ -42,7 +41,6 @@ module SalesforceBulkApi
       raise SalesforceException.new("#{response_parsed['exceptionMessage'][0]} (#{response_parsed['exceptionCode'][0]})") if response_parsed['exceptionCode']
 
       @job_id = response_parsed['id'][0]
-
     end
 
     def close_job()
@@ -74,7 +72,7 @@ module SalesforceBulkApi
       @records_dup = @records.clone
 
       super_records = []
-      (@records_dup.size/@batch_size).to_i.times do
+      (@records_dup.size / @batch_size).to_i.times do
         super_records << @records_dup.pop(@batch_size)
       end
       super_records << @records_dup unless @records_dup.empty?
@@ -137,9 +135,7 @@ module SalesforceBulkApi
           sobject_xml += build_sobject(r[k])
           sobject_xml += "</#{k}>"
         elsif k.to_s.include? '.'
-          sobject_xml += build_relationship_sobject(k, r[k])
-        elsif r[k] == '#N/A'
-          sobject_xml += "<#{k} xsi:nil=\"true\"/>"
+          sobject_xml += build_relationship_sobject(k, r[k])          
         elsif !r[k].to_s.empty?
           sobject_xml += "<#{k}>"
           if r[k].respond_to?(:encode)
@@ -195,11 +191,18 @@ module SalesforceBulkApi
         state = []
         Timeout::timeout(timeout, SalesforceBulkApi::JobTimeout) do
           while true
-            if self.check_job_status['state'][0] == 'Closed'
-              @batch_ids.each do |batch_id|
-                batch_state = self.check_batch_status(batch_id)
-                if batch_state['state'][0] != "Queued" && batch_state['state'][0] != "InProgress"
-                  state << (batch_state)
+            job_status = self.check_job_status
+            if job_status && job_status['state'] && job_status['state'][0] == 'Closed'
+              batch_statuses = {}
+
+              batches_ready = @batch_ids.all? do |batch_id|
+                batch_state = batch_statuses[batch_id] = self.check_batch_status(batch_id)
+                batch_state && batch_state['state'] && batch_state['state'][0] && !['Queued', 'InProgress'].include?(batch_state['state'][0])
+              end
+
+              if batches_ready
+                @batch_ids.each do |batch_id|
+                  state.insert(0, batch_statuses[batch_id])
                   @batch_ids.delete(batch_id)
                 end
               end
